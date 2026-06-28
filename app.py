@@ -12,24 +12,32 @@ st.title("📦 WFS 货件申请生成工具")
 TEMPLATE_FILENAME = "WFS_M.xlsx"
 template_exists = os.path.exists(TEMPLATE_FILENAME)
 
-# 阻断式报错：如果缺失模板直接停止运行，不在主界面显示冗余文字
 if not template_exists:
     st.error(f"系统缺失底层模板 {TEMPLATE_FILENAME}，请联系管理员维护。")
     st.stop()
 
-# 侧边栏极简上传区
+# 侧边栏
 with st.sidebar:
     inventory_file = st.file_uploader("1. 上传库存表 (Inventory)", type=['xlsx', 'csv'])
     packing_files = st.file_uploader("2. 上传装箱单 (支持多选)", type=['xlsx', 'csv'], accept_multiple_files=True)
-
-if inventory_file and packing_files:
-    # 核心更新：按文件名对上传的装箱单进行去重
-    unique_packing_files = list({pack_file.name: pack_file for pack_file in packing_files}.values())
     
-    # 提示去重结果（仅在有重复文件被过滤时显示）
-    if len(unique_packing_files) < len(packing_files):
-        st.caption(f"已自动过滤 {len(packing_files) - len(unique_packing_files)} 份重复上传的文件。")
+    unique_packing_files = []
+    
+    # 【交互更新】：上传后立刻去重并在侧边栏展示有效清单
+    if packing_files:
+        unique_packing_files = list({pack_file.name: pack_file for pack_file in packing_files}.values())
+        
+        # 如果有重复文件被过滤，给出强提醒
+        if len(unique_packing_files) < len(packing_files):
+            st.warning(f"⚠️ 已自动拦截 {len(packing_files) - len(unique_packing_files)} 份重复文件", icon="🪞")
+        
+        # 展示干净的去重后列表
+        st.markdown("**✅ 实际有效装箱单列表：**")
+        for f in unique_packing_files:
+            st.caption(f"📄 {f.name}")
 
+# 主界面逻辑
+if inventory_file and unique_packing_files:
     if st.button("生成 WFS 申请表", type="primary"):
         with st.spinner('处理中...'):
             try:
@@ -44,7 +52,7 @@ if inventory_file and packing_files:
                 summary_data = []
                 generated_files = {}
 
-                # 2. 遍历处理去重后的装箱单
+                # 2. 遍历处理去重后的装箱单 (unique_packing_files)
                 for pack_file in unique_packing_files:
                     if pack_file.name.endswith('.csv'):
                         pack_df = pd.read_csv(pack_file, header=3)
@@ -141,4 +149,5 @@ if inventory_file and packing_files:
             except Exception as e:
                 st.error(f"数据格式错误，请检查传入的表格字段。报错详情：{str(e)}")
 else:
-    st.info("请在左侧上传必要的文件。")
+    if not unique_packing_files:
+        st.info("请在左侧上传必要的文件。")
