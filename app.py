@@ -19,19 +19,16 @@ if not template_exists:
 # 侧边栏
 with st.sidebar:
     inventory_file = st.file_uploader("1. 上传库存表 (Inventory)", type=['xlsx', 'csv'])
-    packing_files = st.file_uploader("2. 上传装箱单 (支持多选)", type=['xlsx', 'csv'], accept_multiple_files=True)
+    packing_files = st.file_uploader("2. 上传装箱单 (支持多选/支持新老格式混排)", type=['xlsx', 'csv'], accept_multiple_files=True)
     
     unique_packing_files = []
     
-    # 【交互更新】：上传后立刻去重并在侧边栏展示有效清单
     if packing_files:
         unique_packing_files = list({pack_file.name: pack_file for pack_file in packing_files}.values())
         
-        # 如果有重复文件被过滤，给出强提醒
         if len(unique_packing_files) < len(packing_files):
             st.warning(f"⚠️ 已自动拦截 {len(packing_files) - len(unique_packing_files)} 份重复文件", icon="🪞")
         
-        # 展示干净的去重后列表
         st.markdown("**✅ 实际有效装箱单列表：**")
         for f in unique_packing_files:
             st.caption(f"📄 {f.name}")
@@ -52,38 +49,77 @@ if inventory_file and unique_packing_files:
                 summary_data = []
                 generated_files = {}
 
-                # 2. 遍历处理去重后的装箱单 (unique_packing_files)
+                # 2. 遍历处理去重后的装箱单 (兼容新老格式)
                 for pack_file in unique_packing_files:
-                    if pack_file.name.endswith('.csv'):
-                        pack_df = pd.read_csv(pack_file, header=3)
+                    is_new_format = False
+                    xls = None
+                    
+                    # 格式嗅探：检查是否为包含特定分表的新格式Excel
+                    if pack_file.name.endswith(('.xls', '.xlsx')):
+                        try:
+                            xls = pd.ExcelFile(pack_file)
+                            if "装箱单统计" in xls.sheet_names and "调拨单-货物明细" in xls.sheet_names:
+                                is_new_format = True
+                        except Exception:
+                            pass
+                    
+                    if is_new_format:
+                        # ============== 新版装箱单逻辑 ==============
+                        df_stats = pd.read_excel(xls, sheet_name="装箱单统计")
+                        df_details = pd.read_excel(xls, sheet_name="调拨单-货物明细")
+                        
+                        # 单号：优先取调拨履约号(FA开头匹配WFS要求)，否则取调拨单号
+                        if '调拨履约号' in df_details.columns and not df_details['调拨履约号'].dropna().empty:
+                            order_id = df_details['调拨履约号'].dropna().iloc[0]
+                        else:
+                            order_id = df_details['调拨单号'].dropna().iloc[0] if '调拨单号' in df_details.columns and not df_details['调拨单号'].dropna().empty else "未知单号"
+                        
+                        # 箱数计算
+                        box_count = len(df_stats['发货仓箱号'].dropna().unique())
+                        
+                        # 最重/最轻 重量计算
+                        weights = pd.to_numeric(df_stats['参考计费重'], errors='coerce').dropna()
+                        max_weight, min_weight = (weights.max(), weights.min()) if not weights.empty else (0, 0)
+                        
+                        # 数量透视汇总
+                        df_details_clean = df_details.dropna(subset=['平台SKU'])
+                        grouped_pack = df_details_clean.groupby('平台SKU', as_index=False)['期望出库数'].sum()
+                        grouped_pack = grouped_pack.rename(columns={'期望出库数': '数量'})
+                        total_qty = grouped_pack['数量'].sum()
+                        
                     else:
-                        pack_df = pd.read_excel(pack_file, header=3)
+                        # ============== 旧版装箱单逻辑 ==============
+                        pack_file.seek(0) # 重置文件读取指针
+                        if pack_file.name.endswith('.csv'):
+                            pack_df = pd.read_csv(pack_file, header=3)
+                        else:
+                            pack_df = pd.read_excel(pack_file, header=3)
 
-                    # 提取基础数据
-                    order_id = pack_df['出库单号'].dropna().iloc[0] if '出库单号' in pack_df.columns and not pack_df['出库单号'].dropna().empty else "未知单号"
-                    box_count = len(pack_df['箱号'].dropna().unique())
+                        order_id = pack_df['出库单号'].dropna().iloc[0] if '出库单号' in pack_df.columns and not pack_df['出库单号'].dropna().empty else "未知单号"
+                        box_count = len(pack_df['箱号'].dropna().unique())
+                        
+                        weights = pd.to_numeric(pack_df['重量'], errors='coerce').dropna()
+                        max_weight, min_weight = (weights.max(), weights.min()) if not weights.empty else (0, 0)
+                        
+                        pack_df_clean = pack_df.dropna(subset=['平台SKU'])
+                        grouped_pack = pack_df_clean.groupby('平台SKU', as_index=False)['数量'].sum()
+                        total_qty = grouped_pack['数量'].sum()
                     
-                    weights = pd.to_numeric(pack_df['重量'], errors='coerce').dropna()
-                    max_weight, min_weight = (weights.max(), weights.min()) if not weights.empty else (0, 0)
-                    
-                    # 透视汇总
-                    grouped_pack = pack_df.groupby('平台SKU', as_index=False)['数量'].sum()
-                    total_qty = grouped_pack['数量'].sum()
-                    
+                    # 汇总数据收集（供页面报告展示）
                     summary_data.append({
                         "装箱单文件名": pack_file.name,
                         "出库单号": order_id,
                         "总数量": total_qty,
                         "装箱数": box_count,
                         "最重(kg)": f"{max_weight:.2f}",
-                        "最轻(kg)": f"{min_weight:.2f}"
+                        "最轻(kg)": f"{min_weight:.2f}",
+                        "文件格式": "新版(双分表)" if is_new_format else "旧版"
                     })
                     
-                    # 3. 载入并填入官方模板
+                    # 3. 载入并填入官方模板 (共享写入逻辑)
                     wb = openpyxl.load_workbook(TEMPLATE_FILENAME)
                     ws = wb.active
                     
-                    # 清除可能存在的旧数据，保留格式
                     if ws.max_row >= 3:
                         for r in range(3, ws.max_row + 1):
                             for c in range(1, 10):
